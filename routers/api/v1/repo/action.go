@@ -7,11 +7,14 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 
 	actions_model "forgejo.org/models/actions"
 	"forgejo.org/models/db"
 	secret_model "forgejo.org/models/secret"
+	actions_module "forgejo.org/modules/actions"
 	api "forgejo.org/modules/structs"
 	"forgejo.org/modules/util"
 	"forgejo.org/modules/web"
@@ -21,6 +24,11 @@ import (
 	"forgejo.org/services/context"
 	"forgejo.org/services/convert"
 	secrets_service "forgejo.org/services/secrets"
+)
+
+const (
+	defaultActionJobLogLimit = 64 * 1024
+	maxActionJobLogLimit     = 64 * 1024
 )
 
 // ListActionsSecrets list an repo's actions secrets
@@ -1157,6 +1165,179 @@ func ListActionRunJobs(ctx *context.APIContext) {
 	}
 
 	ctx.JSON(http.StatusOK, response)
+}
+
+// GetActionJobLogs returns the raw logs for a job's latest attempt.
+func GetActionJobLogs(ctx *context.APIContext) {
+	// swagger:operation GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/logs repository GetActionJobLogs
+	// ---
+	// summary: Get logs for a workflow job
+	// produces:
+	// - text/plain
+	// parameters:
+	// - name: owner
+	//   in: path
+	//   description: owner of the repo
+	//   type: string
+	//   required: true
+	// - name: repo
+	//   in: path
+	//   description: name of the repo
+	//   type: string
+	//   required: true
+	// - name: run_id
+	//   in: path
+	//   description: ID of the workflow run
+	//   type: integer
+	//   format: int64
+	//   required: true
+	// - name: job_id
+	//   in: path
+	//   description: ID of the workflow job
+	//   type: integer
+	//   format: int64
+	//   required: true
+	// - name: offset
+	//   in: query
+	//   description: byte offset to start reading from
+	//   type: integer
+	//   format: int64
+	// - name: limit
+	//   in: query
+	//   description: maximum bytes to return, capped at 64 KiB
+	//   type: integer
+	//   format: int64
+	// - name: tail
+	//   in: query
+	//   description: return the last `limit` bytes instead of reading from `offset`
+	//   type: boolean
+	// responses:
+	//   "200":
+	//     "$ref": "#/responses/string"
+	//   "400":
+	//     "$ref": "#/responses/error"
+	//   "403":
+	//     "$ref": "#/responses/forbidden"
+	//   "404":
+	//     "$ref": "#/responses/notFound"
+
+	run, err := actions_model.GetRunByID(ctx, ctx.ParamsInt64(":run_id"))
+	if err != nil {
+		if errors.Is(err, util.ErrNotExist) {
+			ctx.Error(http.StatusNotFound, "GetRunByID", err)
+		} else {
+			ctx.Error(http.StatusInternalServerError, "GetRunByID", err)
+		}
+		return
+	}
+	if ctx.Repo.Repository.ID != run.RepoID {
+		ctx.Error(http.StatusNotFound, "GetRunByID", util.ErrNotExist)
+		return
+	}
+
+	job, err := actions_model.GetRunJobByID(ctx, ctx.ParamsInt64(":job_id"))
+	if err != nil {
+		if errors.Is(err, util.ErrNotExist) {
+			ctx.Error(http.StatusNotFound, "GetRunJobByID", err)
+		} else {
+			ctx.Error(http.StatusInternalServerError, "GetRunJobByID", err)
+		}
+		return
+	}
+	if job.RunID != run.ID {
+		ctx.Error(http.StatusNotFound, "GetRunJobByID", util.ErrNotExist)
+		return
+	}
+	if job.TaskID == 0 {
+		ctx.Error(http.StatusNotFound, "GetRunJobByID", "job is not started")
+		return
+	}
+
+	task, err := actions_model.GetTaskByID(ctx, job.TaskID)
+	if err != nil {
+		if errors.Is(err, util.ErrNotExist) {
+			ctx.Error(http.StatusNotFound, "GetTaskByID", err)
+		} else {
+			ctx.Error(http.StatusInternalServerError, "GetTaskByID", err)
+		}
+		return
+	}
+	if task.LogExpired {
+		ctx.Error(http.StatusNotFound, "GetTaskByID", "logs have been cleaned up")
+		return
+	}
+
+	offset, limit, tail, ok := parseActionJobLogQuery(ctx)
+	if !ok {
+		return
+	}
+	logSize := task.LogSize
+	if tail {
+		offset = max(logSize-limit, 0)
+	} else if offset > logSize {
+		offset = logSize
+	}
+	length := min(limit, logSize-offset)
+
+	reader, err := actions_module.OpenLogs(ctx, task.LogInStorage, task.LogFilename)
+	if err != nil {
+		ctx.Error(http.StatusInternalServerError, "OpenLogs", err)
+		return
+	}
+	defer reader.Close()
+
+	if _, err := reader.Seek(offset, io.SeekStart); err != nil {
+		ctx.Error(http.StatusInternalServerError, "Seek", err)
+		return
+	}
+
+	more := offset+length < logSize
+	if tail {
+		more = offset > 0
+	}
+
+	ctx.Resp.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	ctx.Resp.Header().Set("X-Log-More", strconv.FormatBool(more))
+	ctx.Resp.Header().Set("X-Log-Offset", strconv.FormatInt(offset, 10))
+	ctx.Resp.Header().Set("X-Log-Size", strconv.FormatInt(logSize, 10))
+	ctx.Resp.WriteHeader(http.StatusOK)
+	if _, err := io.CopyN(ctx.Resp, reader, length); err != nil && !errors.Is(err, io.EOF) {
+		ctx.Error(http.StatusInternalServerError, "CopyLog", err)
+		return
+	}
+}
+
+func parseActionJobLogQuery(ctx *context.APIContext) (offset, limit int64, tail bool, ok bool) {
+	limit = defaultActionJobLogLimit
+	if limitStr := ctx.FormTrim("limit"); limitStr != "" {
+		parsed, err := strconv.ParseInt(limitStr, 10, 64)
+		if err != nil || parsed < 0 {
+			ctx.Error(http.StatusBadRequest, "limit", "limit must be a non-negative integer")
+			return 0, 0, false, false
+		}
+		limit = min(parsed, int64(maxActionJobLogLimit))
+	}
+
+	if offsetStr := ctx.FormTrim("offset"); offsetStr != "" {
+		parsed, err := strconv.ParseInt(offsetStr, 10, 64)
+		if err != nil || parsed < 0 {
+			ctx.Error(http.StatusBadRequest, "offset", "offset must be a non-negative integer")
+			return 0, 0, false, false
+		}
+		offset = parsed
+	}
+
+	tailStr := ctx.FormTrim("tail")
+	if tailStr != "" {
+		parsed, err := strconv.ParseBool(tailStr)
+		if err != nil {
+			ctx.Error(http.StatusBadRequest, "tail", "tail must be a boolean")
+			return 0, 0, false, false
+		}
+		tail = parsed
+	}
+
+	return offset, limit, tail, true
 }
 
 // ListActionArtifacts list artifacts for a repository

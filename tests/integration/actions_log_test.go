@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	actions_model "forgejo.org/models/actions"
 	auth_model "forgejo.org/models/auth"
 	repo_model "forgejo.org/models/repo"
 	"forgejo.org/models/unittest"
@@ -154,6 +155,21 @@ jobs:
 						logTextLines[idx],
 					)
 				}
+
+				job := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionRunJob{TaskID: task.Id})
+				apiLogURL := fmt.Sprintf("/api/v1/repos/%s/%s/actions/runs/%d/jobs/%d/logs", user2.Name, repo.Name, job.RunID, job.ID)
+				apiLogReq := NewRequest(t, "GET", apiLogURL).AddTokenAuth(token)
+				apiLogResp := MakeRequest(t, apiLogReq, http.StatusOK)
+				assert.Equal(t, resp.Body.String(), apiLogResp.Body.String())
+				assert.Equal(t, "0", apiLogResp.Header().Get("X-Log-Offset"))
+				assert.Equal(t, fmt.Sprint(len(apiLogResp.Body.String())), apiLogResp.Header().Get("X-Log-Size"))
+				assert.Equal(t, "false", apiLogResp.Header().Get("X-Log-More"))
+
+				apiLogTailReq := NewRequest(t, "GET", apiLogURL+"?tail=true&limit=16").AddTokenAuth(token)
+				apiLogTailResp := MakeRequest(t, apiLogTailReq, http.StatusOK)
+				assert.Equal(t, apiLogResp.Body.String()[len(apiLogResp.Body.String())-16:], apiLogTailResp.Body.String())
+				assert.Equal(t, fmt.Sprint(len(apiLogResp.Body.String())-16), apiLogTailResp.Header().Get("X-Log-Offset"))
+				assert.Equal(t, "true", apiLogTailResp.Header().Get("X-Log-More"))
 
 				resetFunc()
 			})

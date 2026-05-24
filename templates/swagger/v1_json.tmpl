@@ -6387,6 +6387,84 @@
         }
       }
     },
+    "/repos/{owner}/{repo}/actions/runs/{run_id}/jobs/{job_id}/logs": {
+      "get": {
+        "produces": [
+          "text/plain"
+        ],
+        "tags": [
+          "repository"
+        ],
+        "summary": "Get logs for a workflow job",
+        "operationId": "GetActionJobLogs",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "owner of the repo",
+            "name": "owner",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "string",
+            "description": "name of the repo",
+            "name": "repo",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "ID of the workflow run",
+            "name": "run_id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "ID of the workflow job",
+            "name": "job_id",
+            "in": "path",
+            "required": true
+          },
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "byte offset to start reading from",
+            "name": "offset",
+            "in": "query"
+          },
+          {
+            "type": "integer",
+            "format": "int64",
+            "description": "maximum bytes to return, capped at 64 KiB",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "type": "boolean",
+            "description": "return the last `limit` bytes instead of reading from `offset`",
+            "name": "tail",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/responses/string"
+          },
+          "400": {
+            "$ref": "#/responses/error"
+          },
+          "403": {
+            "$ref": "#/responses/forbidden"
+          },
+          "404": {
+            "$ref": "#/responses/notFound"
+          }
+        }
+      }
+    },
     "/repos/{owner}/{repo}/actions/secrets": {
       "get": {
         "produces": [

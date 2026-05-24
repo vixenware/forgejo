@@ -1254,6 +1254,7 @@ func Routes() *web.Route {
 						m.Get("/{run_id}", repo.GetActionRun)
 						m.Delete("/{run_id}", reqToken(), reqAdmin(unit.TypeActions), repo.DeleteActionRun)
 						m.Get("/{run_id}/jobs", repo.ListActionRunJobs)
+						m.Get("/{run_id}/jobs/{job_id}/logs", repo.GetActionJobLogs)
 						m.Get("/{run_id}/artifacts", repo.ListActionRunArtifacts)
 					})
 
